@@ -1666,20 +1666,124 @@ function exportBackup() {
     a.click();
 }
 
-function importBackupFile(input) {
+async function importBackupFile(input) {
     const f = input.files[0];
     if (!f) return;
     const r = new FileReader();
-    r.onload = e => {
+    r.onload = async (e) => {
         try {
             const d = JSON.parse(e.target.result);
-            if (d.weeklyResults) state.weeklyResults = d.weeklyResults;
-            if (d.aspValues) state.aspValues = d.aspValues;
-            saveToStorage(); initializeCategoryTables(); renderWoWView(); updateStats();
-            alert('✅ Imported');
-        } catch (err) { alert('❌ ' + err.message); }
+            
+            // Merge (preserve existing data + overlay imported)
+            const existingDates = new Set(state.weeklyResults.map(w => w.date));
+            const importedDates = new Set();
+            
+            if (d.weeklyResults) {
+                // Replace existing weeks with imported ones (by date), add new ones
+                const weekMap = {};
+                state.weeklyResults.forEach(w => weekMap[w.date] = w);
+                d.weeklyResults.forEach(w => {
+                    weekMap[w.date] = w;
+                    importedDates.add(w.date);
+                });
+                state.weeklyResults = Object.values(weekMap);
+            }
+            if (d.aspValues) {
+                state.aspValues = { ...state.aspValues, ...d.aspValues };
+            }
+            
+            saveToStorage();
+            initializeCategoryTables();
+            renderWoWView();
+            renderInsights();
+            updateStats();
+            
+            const importCount = importedDates.size;
+            const newCount = [...importedDates].filter(d => !existingDates.has(d)).length;
+            
+            let msg = `✅ Imported ${importCount} week(s) into local storage (${newCount} new, ${importCount - newCount} updated).`;
+            
+            // Offer to sync to cloud
+            if (CONFIG.SYNC_ENABLED && CONFIG.APPS_SCRIPT_URL && importCount > 0) {
+                const doSync = confirm(msg + `\n\nAlso push these ${importCount} weeks to Google Sheet?`);
+                if (doSync) {
+                    await bulkSyncToCloud([...importedDates]);
+                }
+            } else {
+                alert(msg);
+            }
+        } catch (err) {
+            alert('❌ Import failed: ' + err.message);
+        }
     };
     r.readAsText(f);
+}
+
+async function bulkSyncToCloud(dateFilter) {
+    // Push weeks (all, or filtered by dates) to the cloud sequentially.
+    const weeks = dateFilter
+        ? state.weeklyResults.filter(w => dateFilter.includes(w.date))
+        : state.weeklyResults;
+    
+    if (weeks.length === 0) {
+        alert('Nothing to sync.');
+        return;
+    }
+    
+    const confirmMsg = `Ready to sync ${weeks.length} week(s) to Google Sheet? This will overwrite any existing data for these weeks in the sheet.`;
+    if (!confirm(confirmMsg)) return;
+    
+    let done = 0, failed = 0;
+    const failures = [];
+    updateSyncStatus('syncing', `Syncing 0/${weeks.length}...`);
+    
+    for (const week of weeks) {
+        try {
+            const res = await fetch(CONFIG.APPS_SCRIPT_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify({
+                    action: 'saveWeek',
+                    date: week.date,
+                    results: week.results,
+                    updatedBy: (state.userName || 'unknown') + ' (bulk-import)'
+                })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            done++;
+        } catch (err) {
+            failed++;
+            failures.push(week.date + ': ' + err.message);
+            console.error('Failed:', week.date, err);
+        }
+        updateSyncStatus('syncing', `Syncing ${done+failed}/${weeks.length}...`);
+        // Small pause to avoid rate limiting
+        await new Promise(r => setTimeout(r, 150));
+    }
+    
+    // Also sync ASP values
+    if (Object.keys(state.aspValues).length > 0) {
+        try {
+            await fetch(CONFIG.APPS_SCRIPT_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify({
+                    action: 'saveASP',
+                    aspValues: state.aspValues,
+                    updatedBy: (state.userName || 'unknown') + ' (bulk-import)'
+                })
+            });
+        } catch (e) { console.error('ASP sync failed', e); }
+    }
+    
+    if (failed === 0) {
+        updateSyncStatus('synced', 'All synced');
+        alert(`✅ Successfully synced ${done} weeks to Google Sheet.`);
+    } else {
+        updateSyncStatus('error', `${done} ok, ${failed} failed`);
+        alert(`⚠️ Synced ${done}/${weeks.length} weeks. ${failed} failed:\n\n${failures.slice(0, 5).join('\n')}${failures.length > 5 ? '\n...' : ''}`);
+    }
 }
 
 init();
