@@ -1786,6 +1786,158 @@ async function bulkSyncToCloud(dateFilter) {
     }
 }
 
+
+function renderInsights() {
+    const container = document.getElementById('insightsContent');
+    if (!container) return;
+    
+    const weeks = [...state.weeklyResults].sort((a,b) => a.date.localeCompare(b.date));
+    if (weeks.length < 2) {
+        container.innerHTML = '<div class="status info">💡 Insights will appear here once you have at least 2 weeks of data. Currently have ' + weeks.length + ' week(s).</div>';
+        return;
+    }
+    
+    const current = weeks[weeks.length - 1];
+    const previous = weeks[weeks.length - 2];
+    // Last 4 weeks EXCLUDING current for trend context
+    const trailingWeeks = weeks.slice(-5, -1);
+    
+    const prevByV = {};
+    previous.results.forEach(r => prevByV[r.vertical] = r);
+    
+    const trailingByV = {};
+    trailingWeeks.forEach(w => {
+        w.results.forEach(r => {
+            if (!trailingByV[r.vertical]) trailingByV[r.vertical] = [];
+            trailingByV[r.vertical].push(r);
+        });
+    });
+    
+    const SHARE_THRESHOLD = 1.0; // pp
+    const PCT_THRESHOLD = 5.0; // %
+    
+    const analyses = current.results.map(r => {
+        const prev = prevByV[r.vertical];
+        const trail = trailingByV[r.vertical] || [];
+        const avgRev = trail.length ? trail.reduce((s,x) => s + x.nh_revenue_lakhs, 0) / trail.length : 0;
+        const avgSize = trail.length ? trail.reduce((s,x) => s + x.market_size_lakhs, 0) / trail.length : 0;
+        const avgShare = trail.length ? trail.reduce((s,x) => s + x.market_share, 0) / trail.length : 0;
+        
+        const revChg = prev ? (r.nh_revenue_lakhs - prev.nh_revenue_lakhs) : 0;
+        const revPct = prev && prev.nh_revenue_lakhs > 0 ? (revChg / prev.nh_revenue_lakhs * 100) : 0;
+        const sizeChg = prev ? (r.market_size_lakhs - prev.market_size_lakhs) : 0;
+        const sizePct = prev && prev.market_size_lakhs > 0 ? (sizeChg / prev.market_size_lakhs * 100) : 0;
+        const shareChg = prev ? (r.market_share - prev.market_share) : 0;
+        
+        let category = 'flat';
+        let tag = 'Flat';
+        let story = '';
+        
+        if (Math.abs(shareChg) >= SHARE_THRESHOLD) {
+            if (shareChg > 0) {
+                category = 'winning';
+                tag = 'Gaining share';
+                story = `Share up <b>${shareChg.toFixed(2)}pp</b> WoW.`;
+            } else {
+                category = 'losing';
+                tag = 'Losing share';
+                story = `Share down <b>${Math.abs(shareChg).toFixed(2)}pp</b> WoW.`;
+            }
+        } else if (Math.abs(sizePct) >= PCT_THRESHOLD) {
+            if (sizePct > 0) {
+                category = 'growing';
+                tag = 'Category growing';
+                story = `Market size up <b>${sizePct.toFixed(1)}%</b> WoW — category expanding.`;
+            } else {
+                category = 'shrinking';
+                tag = 'Category shrinking';
+                story = `Market size down <b>${Math.abs(sizePct).toFixed(1)}%</b> WoW.`;
+            }
+        } else if (Math.abs(revPct) >= PCT_THRESHOLD) {
+            if (revPct > 0) {
+                category = 'winning';
+                tag = 'Revenue growth';
+                story = `Revenue up <b>${revPct.toFixed(1)}%</b> WoW.`;
+            } else {
+                category = 'losing';
+                tag = 'Revenue decline';
+                story = `Revenue down <b>${Math.abs(revPct).toFixed(1)}%</b> WoW.`;
+            }
+        } else {
+            story = 'All metrics within normal range this week.';
+        }
+        
+        return { vertical: r.vertical, current: r, prev, avgRev, avgSize, avgShare,
+                 revChg, revPct, sizeChg, sizePct, shareChg, category, tag, story };
+    });
+    
+    const catOrder = { winning: 1, losing: 2, growing: 3, shrinking: 4, flat: 5 };
+    analyses.sort((a,b) => (catOrder[a.category] - catOrder[b.category]) || (Math.abs(b.shareChg) - Math.abs(a.shareChg)));
+    
+    const winCount = analyses.filter(a => a.category === 'winning').length;
+    const loseCount = analyses.filter(a => a.category === 'losing').length;
+    const growCount = analyses.filter(a => a.category === 'growing').length;
+    const shrinkCount = analyses.filter(a => a.category === 'shrinking').length;
+    const flatCount = analyses.filter(a => a.category === 'flat').length;
+    
+    const totalRev = current.results.reduce((s,r) => s + r.nh_revenue_lakhs, 0);
+    const totalRevPrev = previous.results.reduce((s,r) => s + r.nh_revenue_lakhs, 0);
+    const totalRevPct = totalRevPrev > 0 ? ((totalRev - totalRevPrev) / totalRevPrev * 100) : 0;
+    
+    let heroText = `Week of <b>${current.date}</b> vs <b>${previous.date}</b>. Total NH revenue: <b>₹${totalRev.toFixed(2)}L</b>`;
+    if (totalRevPrev > 0) {
+        const arrow = totalRevPct >= 0 ? '↑' : '↓';
+        heroText += ` (${arrow} ${Math.abs(totalRevPct).toFixed(1)}% WoW).`;
+    }
+    
+    let html_content = `
+        <div class="insight-hero">
+            <h3>Weekly Snapshot</h3>
+            <p>${heroText}</p>
+            <div class="insight-stats">
+                <div class="insight-stat"><div class="num">${winCount}</div><div class="lbl">Gaining share</div></div>
+                <div class="insight-stat"><div class="num">${loseCount}</div><div class="lbl">Losing share</div></div>
+                <div class="insight-stat"><div class="num">${growCount}</div><div class="lbl">Category growing</div></div>
+                <div class="insight-stat"><div class="num">${shrinkCount}</div><div class="lbl">Category shrinking</div></div>
+                <div class="insight-stat"><div class="num">${flatCount}</div><div class="lbl">Steady</div></div>
+            </div>
+        </div>
+    `;
+    
+    html_content += '<div class="insight-grid">';
+    for (const a of analyses) {
+        const r = a.current;
+        const has4w = trailingByV[a.vertical] && trailingByV[a.vertical].length > 0;
+        
+        const revLine = a.prev
+            ? `${r.nh_revenue_lakhs.toFixed(2)}L <span style="color:#9B8367">(${a.revPct >= 0 ? '+' : ''}${a.revPct.toFixed(1)}%)</span>`
+            : `${r.nh_revenue_lakhs.toFixed(2)}L`;
+        const sizeLine = a.prev
+            ? `${r.market_size_lakhs.toFixed(2)}L <span style="color:#9B8367">(${a.sizePct >= 0 ? '+' : ''}${a.sizePct.toFixed(1)}%)</span>`
+            : `${r.market_size_lakhs.toFixed(2)}L`;
+        const shareLine = a.prev
+            ? `${r.market_share.toFixed(2)}% <span style="color:#9B8367">(${a.shareChg >= 0 ? '+' : ''}${a.shareChg.toFixed(2)}pp)</span>`
+            : `${r.market_share.toFixed(2)}%`;
+        
+        html_content += `
+            <div class="insight-card ${a.category}">
+                <div class="subtitle">${a.vertical}</div>
+                <h4>${a.story}</h4>
+                <div style="margin-top: 12px;">
+                    <div class="insight-metric-row"><span class="name">NH Revenue</span><span class="val">${revLine}</span></div>
+                    <div class="insight-metric-row"><span class="name">Market Size</span><span class="val">${sizeLine}</span></div>
+                    <div class="insight-metric-row"><span class="name">Market Share</span><span class="val">${shareLine}</span></div>
+                    ${has4w ? `<div class="insight-metric-row" style="opacity:0.75; font-size: 12px; padding-top: 8px;"><span class="name">4W avg: ₹${a.avgRev.toFixed(2)}L</span><span class="val" style="color: var(--text-muted);">4W avg: ${a.avgShare.toFixed(2)}%</span></div>` : ''}
+                </div>
+                <span class="insight-tag ${a.category}">${a.tag}</span>
+            </div>
+        `;
+    }
+    html_content += '</div>';
+    container.innerHTML = html_content;
+}
+
+
 init();
 </script>
 </body>
